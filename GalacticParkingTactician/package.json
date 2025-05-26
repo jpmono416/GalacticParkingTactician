@@ -1,0 +1,13 @@
+{
+    "name": "galactic-parking-tactician",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+        "export:web": "node scripts/export-web.js",
+        "deploy:itch": "butler push ./builds ${ITCH_USER}/gpt:web --userversion %npm_package_version%"
+    },
+    "devDependencies": {
+        "rimraf": "^5.0.0",
+        "zip-a-folder": "^1.2.0"
+    }
+}

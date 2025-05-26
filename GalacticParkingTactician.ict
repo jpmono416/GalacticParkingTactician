@@ -8,58 +8,1468 @@ libs:
     gridY: 1024
     debugMode: false
     debugText: 0
-  pointer: {}
+  pointer:
+    startlocked: false
   keyboard: {}
   keyboard.polyfill: {}
   pointer.polyfill: {}
-startroom: -1
+startroom: 94Mbc96bgm3zQN
 contentTypes: []
-actions: []
+actions:
+  - name: PointerDown
+    methods:
+      - code: pointer.Primary
+      - code: pointer.Secondary
 scripts:
   - name: New Script
     code: /* Use scripts to define frequent functions and import small libraries */
 assets:
-  - uid: JQmpkDT1rdJMGk
-    name: test.ts
-    code: "console.log('Hello GPT \U0001F3AE');"
-    language: typescript
-    variables:
-      - pene
-    runAutomatically: true
-    lastmod: 1748042298954
-    type: script
-  - type: room
-    oncreate: ''
-    onstep: ''
-    ondraw: ''
-    onleave: ''
-    gridX: 64
-    gridY: 64
-    diagonalGrid: false
-    disableGrid: false
-    simulate: true
-    width: 1280
-    height: 720
-    restrictCamera: false
-    restrictMaxX: 1280
-    restrictMinX: 0
-    restrictMaxY: 720
-    restrictMinY: 0
-    isUi: false
-    name: Main Screen
-    backgroundColor: '#000000'
-    follow: -1
-    backgrounds: []
-    copies: []
-    tiles: []
-    extends: {}
-    lastmod: 1748042309270
-    events: []
-    behaviors: []
-    extendTypes: ''
-    uid: dFDwrB4NP96HrD
-    properties: []
-globalVars: []
+  - type: folder
+    uid: RBPp3Ft6zBC8H3
+    colorClass: error
+    icon: zap
+    name: Scripts
+    lastmod: 1748043332615
+    entries:
+      - uid: hmHTPQcG5GCRFH
+        name: board.js
+        code: |
+          /* board.js – ordinary script for ct.js 5.2.1 */
+          const board = {
+              TILE_W: 64,
+              TILE_H: 64,
+              HALF_W: 32,
+              HALF_H: 32,
+              COLS: 11,
+              ROWS: 11,
+
+              /* internal occupancy dictionary ----------------------------------- */
+              _cells: Object.create(null),          // key = "col,row"  value = true
+
+              /* helpers ---------------------------------------------------------- */
+              key(col, row) {
+                  return `${col},${row}`;
+              },
+              
+              unoccupy(col, row) {
+                  delete this._cells[this.key(col, row)];
+              },
+
+              isFree(col, row) {
+                  return !this._cells[this.key(col, row)];
+              },
+
+              occupy(col, row) {
+                  this._cells[this.key(col, row)] = true;
+              },
+
+              worldPos(col, row) {
+                  return {
+                      x: col * this.HALF_W,
+                      y: row * this.HALF_H
+                  };
+              },
+
+              /* true  = right-facing, false = left-facing */
+              isRight(col, row) {
+                  return ((col + row) & 1) === 0;
+              },
+
+              /** Convert world-pixels → cell indices. */
+              worldToCell(x, y, offsetX = 0, offsetY = 0) {
+                  return {
+                      col: Math.round((x - offsetX) / this.HALF_W),
+                      row: Math.round((y - offsetY) / this.HALF_H)
+                  };
+              }
+          };
+
+          /* expose globally so every template can use it */
+          ct.board = board;
+        language: typescript
+        variables: []
+        runAutomatically: true
+        lastmod: 1748219996050
+        type: script
+      - uid: 2Lzr3h8b834f2r
+        name: gameState.js
+        code: |
+          /* gameState.js  ─ global turn/phase controller */
+
+          const TurnPhase = {
+              PLAYER: 0,
+              ALIEN: 1,
+              RESOLVE: 2,
+              /** Helper to print readable names */
+              toString(p) {
+                  return ['PLAYER', 'ALIEN', 'RESOLVE'][p] ?? 'UNKNOWN';
+              }
+          };
+
+          /** Expose on ct so any template can access it */
+          ct.gameState = {
+              phase: TurnPhase.PLAYER,
+              turnCount: 1,
+
+              nextPhase() {
+                  /* Advance cyclically: 0 → 1 → 2 → 0… */
+                  this.phase = (this.phase + 1) % 3;
+
+                  /* When we wrap back to PLAYER we just finished a full turn */
+                  if (this.phase === TurnPhase.PLAYER) {
+                      this.turnCount += 1;
+                  }
+
+                  /* Debug print */
+                  console.log(
+                      `%c Turn ${this.turnCount}  Phase: ${TurnPhase.toString(this.phase)}`,
+                      'color: #0ff; font-weight:bold'
+                  );
+              },
+
+              /** Convenience getter */
+              isPlayerPhase()  { return this.phase === TurnPhase.PLAYER; },
+              isAlienPhase()   { return this.phase === TurnPhase.ALIEN;  },
+              isResolvePhase() { return this.phase === TurnPhase.RESOLVE;}
+          };
+        language: typescript
+        variables: []
+        runAutomatically: true
+        lastmod: 1748192793874
+        type: script
+      - uid: 2gQwB6f15WfpPc
+        name: gameController.js
+        code: |
+          /* gameController.js – master loop & event bus */
+
+          (() => {
+              /* --- simple event bus ---------------------------------------------- */
+              const listeners = Object.create(null);
+              ct.on = (ev, fn) => (listeners[ev] ??= []).push(fn);
+              ct.emit = (ev, ...args) => (listeners[ev] || []).forEach(f => f(...args));
+
+              /* --- helper to (de)activate UI templates by name ------------------- */
+          function setTemplatesInteractive(tname, flag) {
+              const tmpl = ct.templates[tname];
+              if (!tmpl || !tmpl.instances) { return; }
+
+              for (const copy of tmpl.instances) {
+                  copy.interactive = flag;      // enables / disables pointer events
+                  copy.alpha = flag ? 1 : 0.5;  // visual feedback
+              }
+          }
+
+
+              /* --- glue our helpers into ct.gameState ---------------------------- */
+              const gs = ct.gameState;
+
+              gs.nextPhase = () => {
+                  /* 0 →1→2→0… */
+                  gs.phase = (gs.phase + 1) % 3;
+
+                  /* Phase-specific side effects */
+                  switch (gs.phase) {
+                  case 0: /* PLAYER ------------------------------------------------- */
+                      gs.turnCount += 1;
+                      ct.emit('OnTurnStart', gs.turnCount);
+                      setTemplatesInteractive('EndTurnButton', true);
+                      break;
+
+                  case 1: /* ALIEN -------------------------------------------------- */
+                      setTemplatesInteractive('EndTurnButton', false);
+                      /* TODO ALI-01 will hook here */
+                      break;
+
+                  case 2: /* RESOLVE ------------------------------------------------ */
+                      /* TODO growth & timers in later user stories */
+                      break;
+                  }
+
+                  /* Debug print */
+                  console.log(
+                      `%c Turn ${gs.turnCount}  Phase: ${['PLAYER','ALIEN','RESOLVE'][gs.phase]}`,
+                      'color:#0ff;font-weight:bold'
+                  );
+              };
+
+              /* optional: start message */
+              console.log('%c GameController ready', 'color:#0f0');
+          })();
+        language: typescript
+        variables: []
+        runAutomatically: false
+        lastmod: 1748208130050
+        type: script
+      - uid: MKrnHpkgNnTmWK
+        name: shipShapes.js
+        code: |
+          /* shipShapes.js  –  predefined shapes as [col,row] arrays */
+          ct.shipShapes = {
+              /* single 1-triangle fallback */
+              single: [[0, 0]],
+
+              /* 1 ─ Cruiser  (w 4, h 5) */
+              cruiser: [
+                  [1,0],[2,0],
+                  [1,1],[2,1],
+                  [1,2],[2,2],
+                  [0,3],[1,3],[2,3],[3,3],
+                  [1,4],[2,4]
+              ],
+
+              /* 2 ─ Speedo  (w 4, h 4) */
+              speedo: [
+                  [1,0],[2,0],
+                  [0,1],[1,1],[2,1],[3,1],
+                  [0,2],[1,2],[2,2],[3,2],
+                  [1,3],[2,3]
+              ],
+
+              /* 3 ─ Tailed  (w 4, h 7) */
+              tailed: [
+                  [0,0],[3,0],
+                  [0,1],[3,1],
+                  [1,2],[2,2],
+                  [1,3],[2,3],
+                  [0,4],[1,4],[2,4],[3,4],
+                  [0,5],[1,5],[2,5],[3,5],
+                  [1,6],[2,6]
+              ],
+
+              /* 4 ─ Star  (w 4, h 5) */
+              star: [
+                  [1,0],[2,0],
+                  [1,1],[2,1],
+                  [0,2],[1,2],[2,2],[3,2],
+                  [1,3],[2,3],
+                  [1,4],[2,4]
+              ],
+
+              /* 5 ─ Lace  (w 4, h 5) */
+              lace: [
+                  [1,0],[2,0],
+                  [1,1],[2,1],
+                  [1,2],[2,2],
+                  [0,3],[1,3],[2,3],[3,3],
+                  [0,4],[3,4]
+              ]
+          };
+        language: typescript
+        variables: []
+        runAutomatically: true
+        lastmod: 1748207774768
+        type: script
+      - uid: 4d4zh5t4btJ5Pz
+        name: textureHelper
+        code: |
+          /* textureHelper.js – drop in Assets ▸ Scripts (Ordinary) */
+          ct.getTex = name => (
+              PIXI.utils.TextureCache[name] ||
+              PIXI.utils.TextureCache[`${name}@frame0`] ||
+              console.warn('[getTex] texture not found:', name)
+          );
+        language: typescript
+        variables: []
+        runAutomatically: true
+        lastmod: 1748217606417
+        type: script
+  - type: folder
+    uid: JMFBHrp7rB2JnR
+    colorClass: act
+    icon: room
+    name: Rooms
+    lastmod: 1748049004344
+    entries:
+      - type: room
+        oncreate: ''
+        onstep: ''
+        ondraw: ''
+        onleave: ''
+        gridX: 64
+        gridY: 64
+        diagonalGrid: false
+        disableGrid: false
+        simulate: true
+        width: 1920
+        height: 1080
+        restrictCamera: false
+        restrictMaxX: 1280
+        restrictMinX: 0
+        restrictMaxY: 720
+        restrictMinY: 0
+        isUi: false
+        name: Spaceport
+        backgroundColor: '#000000'
+        follow: -1
+        backgrounds:
+          - depth: -100
+            texture: LrDRNP6pcBd1B3
+            shiftX: 0
+            shiftY: 0
+            parallaxX: 1
+            parallaxY: 1
+            movementX: 0
+            movementY: 0
+            scaleX: 1
+            scaleY: 1
+            repeat: no-repeat
+        copies:
+          - x: 184
+            'y': 120
+            opacity: 1
+            tint: 16777215
+            scale:
+              x: 1
+              'y': 1
+            rotation: 0
+            uid: QMcBHzDK2R5wjM
+            exts: {}
+            customProperties: {}
+            bindings: {}
+          - x: 192
+            'y': 256
+            opacity: 1
+            tint: 16777215
+            scale:
+              x: 1
+              'y': 1
+            rotation: 0
+            uid: 21zF62B13R9w7q
+            exts: {}
+            customProperties: {}
+            bindings: {}
+        tiles: []
+        extends: {}
+        lastmod: 1748225068586
+        events:
+          - eventKey: OnRoomStart
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: >
+                    /* --- imports / helpers */
+
+
+                    /* drag state (room-local) */
+
+                    this.isDragging  = false;
+
+                    this.dragOffsetX = 0;
+
+                    this.dragOffsetY = 0;
+
+                    const b = ct.board;
+
+                    const offsetX = rooms.current.viewWidth  / 2 - b.COLS *
+                    b.TILE_W / 2;
+
+                    const offsetY = rooms.current.viewHeight / 2 - b.ROWS *
+                    b.HALF_H / 2;
+
+                    ct.board._offsetX = offsetX;
+
+                    ct.board._offsetY = offsetY;
+
+
+                    /* pivot cell on row 4, just outside column −2 (left of
+                    board) */
+
+                    const pivotCol = -2;
+
+                    const pivotRow = 4;
+
+                    const shapeKey = 'cruiser';
+
+
+                    /* world position of that off-board cell */
+
+                    const startX = offsetX + pivotCol * ct.board.TILE_W;
+
+                    const startY = offsetY + pivotRow * ct.board.HALF_H;
+
+
+                    ct.currentShip = templates.copy('HumanShip', startX, startY,
+                    {
+                        col: pivotCol,
+                        row: pivotRow,
+                        shapeKey
+                    });
+
+                    // /* mark tiles */
+
+                    // for (const [dx, dy] of ct.shipShapes[shapeKey]) {
+
+                    //     b.occupy(pivotCol + dx, pivotRow + dy);
+
+                    // }
+
+
+                    /* 1. crear tile-map */
+
+                    const tmap = tilemaps.create(-50);
+
+
+                    /* 2. colocar cada triángulo — ¡coordenadas en píxeles! */
+
+                    for (let row = 0; row < b.ROWS; row++) {
+                        for (let col = 0; col < b.COLS; col++) {
+                            const tex = b.isRight(col, row) ? 'BoardRight' : 'BoardLeft';
+
+                            // x, y en píxeles – paso = 32 px (b.HALF_W / b.HALF_H)
+                            const x = col * b.TILE_W;
+                            const y = row * b.HALF_H;
+
+                            tilemaps.addTile(tmap, tex, x, y);
+                        }
+                    }
+
+
+                    /* 3. congelar la malla para que rinda */
+
+                    tilemaps.cache(tmap);
+
+
+                    /* 4. centrar todo el tile-map en la cámara */
+
+                    tmap.x = (rooms.current.viewWidth  - b.COLS * b.HALF_W) / 2;
+
+                    tmap.y = (rooms.current.viewHeight - b.ROWS * b.HALF_H) / 2;
+            arguments: {}
+            lib: core
+            variables: []
+          - eventKey: OnActionDown
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: >
+                    if (!ct.gameState.isPlayerPhase()) { return; }
+
+                    const ship = ct.currentShip;
+
+
+                    /* Start drag only if pointer is over the ship AND the ship
+                    isn’t locked */
+
+                    if (ship.locked || !pointer.hovers(ship)) { return; }
+
+
+                    /* remove current tiles from board while moving */
+
+                    for (const {col, row} of ship.tiles) {
+                        ct.board.unoccupy(col, row);
+                    }
+
+
+                    /* store offset so ship doesn’t jump */
+
+                    this.dragOffsetX = pointer.x - ship.x;
+
+                    this.dragOffsetY = pointer.y - ship.y;
+
+
+                    this.isDragging = true;
+
+                    ship.z = 20;               // above everything while dragged
+            arguments:
+              action: PointerDown
+            lib: core
+            variables: []
+          - eventKey: OnStep
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: >
+                    if (!this.isDragging) { return; }
+
+
+                    const ship = ct.currentShip;
+
+                    const b    = ct.board;
+
+
+                    /* follow pointer */
+
+                    ship.x = pointer.x - this.dragOffsetX;
+
+                    ship.y = pointer.y - this.dragOffsetY;
+
+
+                    /* convert pointer → grid pivot */
+
+                    const cell = b.worldToCell(pointer.x, pointer.y, b._offsetX,
+                    b._offsetY);
+
+
+                    /* legality test */
+
+                    let legal = true;
+
+                    const shape = ct.shipShapes[ship.shapeKey];
+
+                    for (const [dx, dy] of shape) {
+                        const col = cell.col + dx;
+                        const row = cell.row + dy;
+                        if (
+                            col < 0 || col >= b.COLS ||
+                            row < 0 || row >= b.ROWS ||
+                            !b.isFree(col, row)
+                        ) { legal = false; break; }
+                    }
+
+
+                    /* visual feedback */
+
+                    ship.alpha = legal ? 1 : 0.35;
+
+
+                    /* mouse released this frame? */
+
+                    if (actions.PointerDown.released) {
+                        this.isDragging = false;
+                        ship.z     = 0;
+                        ship.alpha = 1;
+
+                        if (legal) {
+                            /* snap to grid + occupy */
+                            ship.col = cell.col;
+                            ship.row = cell.row;
+                            ship.x   = b._offsetX + ship.col * b.TILE_W;
+                            ship.y   = b._offsetY + ship.row * b.HALF_H;
+
+                            ship.tiles.length = 0;
+                            for (const [dx, dy] of shape) {
+                                const col = ship.col + dx;
+                                const row = ship.row + dy;
+                                ship.tiles.push({col, row});
+                                b.occupy(col, row);
+                            }
+
+                            ship.locked = true;          // <- cannot drag again
+                            console.log('Ship placed at', ship.col, ship.row);
+                        } else {
+                            /* revert */
+                            ship.x = ship.origX;
+                            ship.y = ship.origY;
+                            ship.col = ship.origCol;
+                            ship.row = ship.origRow;
+                            for (const [dx, dy] of shape) {
+                                b.occupy(ship.col + dx, ship.row + dy);
+                            }
+                            console.log('Blocked – reverted');
+                        }
+                    }
+            arguments: {}
+            lib: core
+            variables: []
+        behaviors: []
+        extendTypes: ''
+        uid: 94Mbc96bgm3zQN
+        properties: []
+  - type: folder
+    uid: cFC5HRQT4qKqLr
+    colorClass: success
+    icon: template
+    name: Templates
+    lastmod: 1748181306349
+    entries:
+      - type: template
+        baseClass: AnimatedSprite
+        name: Board
+        depth: 0
+        texture: -1
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnCreate
+            code:
+              - lib: core.propsVars
+                code: set
+                values:
+                  var:
+                    lib: core.hidden
+                    code: property
+                    values:
+                      variableName: TILE_W
+                  value: 32
+              - lib: core.propsVars
+                code: set
+                values:
+                  var:
+                    lib: core.hidden
+                    code: property
+                    values:
+                      variableName: TILE_H
+                  value: 32
+              - lib: core.propsVars
+                code: set
+                values:
+                  var:
+                    lib: core.hidden
+                    code: property
+                    values:
+                      variableName: RADIUS
+                  value: 6
+              - lib: core.propsVars
+                code: set
+                values:
+                  value:
+                    lib: core.objects
+                    code: new empty object
+                    values: {}
+                  var:
+                    lib: core.hidden
+                    code: property
+                    values:
+                      variableName: cells
+            arguments: {}
+            lib: core
+            variables: []
+        extends:
+          cgroup: ''
+        lastmod: 1748181556762
+        uid: zRcHtK2qwR5k5z
+        behaviors: []
+        extendTypes: ''
+        properties:
+          - TILE_W
+          - TILE_H
+          - RADIUS
+          - cells
+        nineSliceSettings:
+          top: 16
+          left: 16
+          bottom: 16
+          right: 16
+          autoUpdate: false
+      - type: template
+        baseClass: AnimatedSprite
+        name: EndTurnButton
+        depth: -5
+        texture: FzHChg5zHCPDrm
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnStep
+            lib: core
+            code:
+              - lib: core.movement
+                code: move copy
+                values: {}
+            arguments: {}
+            variables: []
+          - eventKey: OnCreate
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: |
+                    this.interactive = true;  // enable pointer events
+                    this.cursor = 'pointer';  // hand icon
+            arguments: {}
+            lib: core
+            variables: []
+          - eventKey: OnPointerClick
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: |
+                    /* Call the phase machine */
+                    ct.gameState.nextPhase();
+            arguments: {}
+            lib: core
+            variables: []
+        extends:
+          cgroup: ''
+        lastmod: 1748192839606
+        uid: QMcBHzDK2R5wjM
+        behaviors: []
+        extendTypes: ''
+        properties: []
+        tilingSettings:
+          scrollSpeedX: 0
+          scrollSpeedY: 0
+          pixelPerfect: false
+          isUi: false
+        repeaterSettings:
+          defaultCount: 3
+      - type: template
+        baseClass: AnimatedSprite
+        name: ShipGhost
+        depth: -4
+        texture: wpd65rBt45L1rp
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnCreate
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: >
+                    /* Data passed from ShipButton.copy(...) */
+
+                    this.offsetX   = this.offsetX;
+
+                    this.offsetY   = this.offsetY;
+
+                    this.shapeKey  = this.shapeKey || 'single';   // default
+                    shape
+
+
+                    this.anchor = 0.5;
+
+                    this.alpha  = 0.6;
+            arguments: {}
+            lib: core
+            variables: []
+          - eventKey: OnDraw
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: >-
+                    // Debug offset to align everything
+
+                    // if (pointer.leftDown && !ct.meta.debugLogged) {
+
+                    //     console.log('offsetX', this.offsetX, 'offsetY',
+                    this.offsetY);
+
+                    //     ct.meta.debugLogged = true;
+
+                    // }
+
+                    if (!this.onceLogged) {
+                        console.log('[ShipGhost] Step running');   // should print every time you spawn a ghost
+                        this.onceLogged = true;
+                    }
+
+
+                    /* ------------------------------------------------ follow
+                    pointer */
+
+                    this.x = pointer.x;
+
+                    this.y = pointer.y;
+
+
+                    /* ------------------------------------------------ shape
+                    helpers */
+
+                    this.shapeKey = this.shapeKey || 'single';
+
+                    const shape   = ct.shipShapes[this.shapeKey] ||
+                    ct.shipShapes.single;
+
+                    const b       = ct.board;
+
+                    const cell    = b.worldToCell(this.x, this.y, this.offsetX,
+                    this.offsetY);
+
+
+                    /* ------------------------------------------------ legality
+                    check */
+
+                    let legal = ct.gameState.isPlayerPhase();
+
+
+                    for (const [dx, dy] of shape) {
+                        const col = cell.col + dx;
+                        const row = cell.row + dy;
+                        if (
+                            col < 0 || col >= b.COLS ||
+                            row < 0 || row >= b.ROWS ||
+                            !b.isFree(col, row)
+                        ) {
+                            legal = false;
+                            break;
+                        }
+                    }
+
+
+                    /* ------------------------------------------------ update
+                    preview sprites */
+
+                    if (!this.ghostSprites) {
+                        this.ghostSprites = [];
+                    }
+
+                    let i = 0;
+
+                    for (const [dx, dy] of shape) {
+                        let spr = this.ghostSprites[i];
+                        if (!spr) {
+                            spr = new PIXI.Sprite();
+                            spr.anchor.set(0.5);
+                            this.addChild(spr);
+                            this.ghostSprites[i] = spr;
+                        }
+
+                        const col = cell.col + dx;
+                        const row = cell.row + dy;
+                        const right = b.isRight(col, row);
+                        spr.texture = PIXI.utils.TextureCache[right ? 'TriRight' : 'TriLeft'];
+                        spr.x = dx * b.HALF_W;
+                        spr.y = dy * b.HALF_H;
+                        spr.tint = legal ? 0x00ff00 : 0xff0000;
+                        i++;
+                    }
+
+                    /* hide any extra sprites if shape changed */
+
+                    for (; i < this.ghostSprites.length; i++) {
+                        this.ghostSprites[i].visible = false;
+                    }
+
+
+                    /* ------------------------------------------------ leader
+                    sprite for cursor hit-area */
+
+                    const rightLeader = b.isRight(cell.col, cell.row);
+
+                    this.tex  = rightLeader ? 'TriRight' : 'TriLeft';
+
+                    this.tint = 0xffffff;               // leader stays white
+
+
+                    /* ------------------------------------------------ place on
+                    release */
+
+                    if (pointer.leftReleased) {
+                        if (legal) {
+                            templates.copy(
+                                'HumanShip',
+                                this.offsetX + cell.col * b.HALF_W,
+                                this.offsetY + cell.row * b.HALF_H,
+                                { col: cell.col, row: cell.row, shapeKey: this.shapeKey }
+                            );
+                            /* mark occupied cells */
+                            for (const [dx, dy] of shape) {
+                                b.occupy(cell.col + dx, cell.row + dy);
+                            }
+                        } else {
+                            console.log('[ShipGhost] blocked – not placing');
+                        }
+                        this.kill = true;
+                    }
+            arguments: {}
+            lib: core
+            variables: []
+        extends:
+          cgroup: ''
+        lastmod: 1748206730062
+        uid: JDmjwzbGd3NDJ7
+        behaviors: []
+        extendTypes: ''
+        properties: []
+      - type: template
+        baseClass: AnimatedSprite
+        name: ShipButton
+        depth: 0
+        texture: mhCTnMHcJHm8pm
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnCreate
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: |
+                    //this.anchor = 0.5;
+                    //this.x = 96;
+                    //this.y = 64;
+                    this.interactive = true;
+                    this.cursor = 'pointer';
+            arguments: {}
+            lib: core
+            variables: []
+          - eventKey: OnPointerDown
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: >
+                    /* Create the drag ghost at pointer position */
+
+                    if (!ct.gameState.isPlayerPhase()) {
+                        return; // ignore clicks out of player phase
+                    };
+
+
+                    const offsetX = rooms.current.viewWidth  / 2 - ct.board.COLS
+                    * ct.board.HALF_W / 2;
+
+                    const offsetY = rooms.current.viewHeight / 2 - ct.board.ROWS
+                    * ct.board.HALF_H / 2;
+
+
+                    templates.copy('ShipGhost',
+                        pointer.x,
+                        pointer.y,
+                        { offsetX,
+                          offsetY,
+                          shapeKey: 'cruiser'
+                        }
+                    );
+            arguments: {}
+            lib: core
+            variables: []
+        extends:
+          cgroup: ''
+        lastmod: 1748203551657
+        uid: 21zF62B13R9w7q
+        behaviors: []
+        extendTypes: ''
+        properties: []
+      - type: template
+        baseClass: AnimatedSprite
+        name: HumanShip
+        depth: 0
+        texture: FRJWJfpK6w1kzM
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnStep
+            lib: core
+            code:
+              - lib: core.movement
+                code: move copy
+                values: {}
+              - lib: core.misc
+                code: js
+                values:
+                  code: |
+                    if (!this.dragging) { return; }
+
+                    const b = ct.board;
+
+                    /* follow pointer */
+                    this.x = pointer.x - this.dragOffsetX;
+                    this.y = pointer.y - this.dragOffsetY;
+
+                    /* pivot cell = pointer position snapped to grid */
+                    const cell = b.worldToCell(
+                        pointer.x,
+                        pointer.y,
+                        b._offsetX, b._offsetY
+                    );
+
+                    /* legality test */
+                    let legal = true;
+                    const shape = ct.shipShapes[this.shapeKey];
+
+                    for (const [dx, dy] of shape) {
+                        const col = cell.col + dx;
+                        const row = cell.row + dy;
+                        if (
+                            col < 0 || col >= b.COLS ||
+                            row < 0 || row >= b.ROWS ||
+                            !b.isFree(col, row)
+                        ) {
+                            legal = false;
+                            break;
+                        }
+                    }
+                    this.alpha = legal ? 1 : 0.35;
+
+                    /* stop dragging on mouse-up */
+                    if (actions.PointerDown.released) {
+                        this.dragging = false;
+                        this.z = 0;
+                        this.alpha = 1;
+
+                        if (legal) {
+                            /* snap to grid */
+                            this.col = cell.col;
+                            this.row = cell.row;
+                            this.x   = b._offsetX + this.col * b.TILE_W;
+                            this.y   = b._offsetY + this.row * b.HALF_H;
+                        } else {
+                            /* revert to start */
+                            this.col = this.origCol;
+                            this.row = this.origRow;
+                            this.x   = this.origX;
+                            this.y   = this.origY;
+                        }
+
+                        /* rebuild tile list & occupy */
+                        this.tiles.length = 0;
+                        for (const [dx, dy] of shape) {
+                            const col = this.col + dx;
+                            const row = this.row + dy;
+                            this.tiles.push({col, row});
+                            ct.board.occupy(col, row);
+                        }
+                    }
+            arguments: {}
+            variables: []
+          - eventKey: OnCreate
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: >
+                    /* HumanShip ▸ Create  – draw every triangle of the ship */
+
+                    /* make the parent copy invisible – we draw everything with
+                    children */
+
+                    this.texture = PIXI.Texture.EMPTY;
+
+
+                    const b        = ct.board;
+
+                    const shape    = ct.shipShapes[this.shapeKey] ||
+                    ct.shipShapes.single;
+
+                    const pivotCol = this.col;
+
+                    const pivotRow = this.row;
+
+
+                    /* helper to resolve 'ShipRight' or 'ShipLeft' no matter the
+                    atlas suffix */
+
+                    const getTex = name =>
+                        PIXI.utils.TextureCache[name] ||
+                        PIXI.utils.TextureCache[`${name}@frame0`];
+
+                    /* store tile list for later logic */
+
+                    this.tiles = [];
+
+
+                    for (const [dx, dy] of shape) {
+                        const col = pivotCol + dx;
+                        const row = pivotRow + dy;
+
+                        /* choose orientation */
+                        const texName = b.isRight(col, row) ? 'ShipRight' : 'ShipLeft';
+                        const pixiTex = getTex(texName);
+                        if (!pixiTex) {
+                            console.warn('[HumanShip] missing texture:', texName);
+                            continue;                       // skip this tile, avoids crash
+                        }
+
+                        /* child sprite */
+                        const tri = new PIXI.Sprite(pixiTex);
+                        tri.anchor.set(0);                 // align top-left in parent space
+                        tri.x = dx * b.TILE_W;             // 32-px steps horizontally
+                        tri.y = dy * b.HALF_H;             // 32-px steps vertically
+                        this.addChild(tri);
+
+                        this.tiles.push({col, row});
+                    }
+
+
+                    this.dragging = false;
+
+                    /* parent copy is already placed by templates.copy(...) */
+
+                    this.anchor.set(0);                    // top-left origin
+
+
+                    Ship->PointerDown
+
+                    if (!ct.gameState.isPlayerPhase()) {
+                        return;                       // dragging only during player phase
+                    }
+
+
+                    /* store drag offset */
+
+                    this.dragDx = pointer.x - this.x;
+
+                    this.dragDy = pointer.y - this.y;
+
+
+                    /* remember original pivot & pos in case we cancel */
+
+                    this.origCol = this.col;
+
+                    this.origRow = this.row;
+
+                    this.origX   = this.x;
+
+                    this.origY   = this.y;
+
+
+                    /* release current tiles */
+
+                    for (const {col, row} of this.tiles) {
+                        ct.board.unoccupy(col, row);
+                    }
+
+
+                    this.dragging = true;
+
+                    this.z = 20;                      // render above everything
+                    while dragging
+            arguments: {}
+            lib: core
+            variables: []
+          - eventKey: OnActionDown
+            code:
+              - lib: core.misc
+                code: js
+                values:
+                  code: >
+                    if (!ct.gameState.isPlayerPhase()) {
+                        return;                       // dragging only during player phase
+                    }
+
+                    this.dragOffsetX = pointer.x - this.x;
+
+                    this.dragOffsetY = pointer.y - this.y;
+
+
+
+                    /* remember original pivot & pos in case we cancel */
+
+                    this.origCol = this.col;
+
+                    this.origRow = this.row;
+
+                    this.origX   = this.x;
+
+                    this.origY   = this.y;
+
+
+                    /* release current tiles */
+
+                    for (const {col, row} of this.tiles) {
+                        ct.board.unoccupy(col, row);
+                    }
+
+
+                    this.dragging = true;
+
+                    this.z = 20;                      // render above everything
+                    while dragging
+            arguments:
+              action: PointerDown
+            lib: core
+            variables: []
+        extends:
+          cgroup: ''
+        lastmod: 1748212518897
+        uid: m3Pgp1HKmJqg1f
+        behaviors: []
+        extendTypes: ''
+        properties: []
+  - type: folder
+    uid: BkKhQq7RgRzn1z
+    colorClass: warning
+    icon: texture
+    name: Textures
+    lastmod: 1748187083474
+    entries:
+      - lastmod: 1748188760131
+        type: texture
+        name: TriTile
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 64
+        imgHeight: 64
+        width: 64
+        height: 64
+        offx: 0
+        offy: 0
+        origname: iHgM6twbR8HbKMB.png
+        shape: rect
+        left: 0
+        right: 1
+        top: 0
+        bottom: 1
+        uid: HgM6twbR8HbKMB
+        padding: 1
+        isBlank: true
+        source: 'C:\Users\jpmon\Downloads\Triangulo_64x64.png'
+        tiled: true
+      - lastmod: 1748188701463
+        type: texture
+        name: TriLeft
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 64
+        imgHeight: 64
+        width: 64
+        height: 64
+        offx: 0
+        offy: 0
+        origname: iwpd65rBt45L1rp.png
+        shape: rect
+        left: 0
+        right: 1
+        top: 0
+        bottom: 1
+        uid: wpd65rBt45L1rp
+        padding: 1
+        isBlank: false
+        source: 'C:\Users\jpmon\Downloads\TriLeft.png'
+      - lastmod: 1748188762625
+        type: texture
+        name: TriRight
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 64
+        imgHeight: 64
+        width: 64
+        height: 64
+        offx: 0
+        offy: 0
+        origname: ifWfhkrfW8pwG9t.png
+        shape: rect
+        left: 0
+        right: 1
+        top: 0
+        bottom: 1
+        uid: fWfhkrfW8pwG9t
+        padding: 1
+        isBlank: true
+        source: 'C:\Users\jpmon\Downloads\TriRight.png'
+        tiled: true
+      - lastmod: 1748193292371
+        type: texture
+        name: BtnEndTurn
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 96
+          - 32
+        marginx: 0
+        marginy: 0
+        imgWidth: 192
+        imgHeight: 64
+        width: 192
+        height: 64
+        offx: 0
+        offy: 0
+        origname: iFzHChg5zHCPDrm.png
+        shape: rect
+        left: 96
+        right: 96
+        top: 32
+        bottom: 32
+        uid: FzHChg5zHCPDrm
+        padding: 1
+        isBlank: false
+        source: 'C:\Users\jpmon\Downloads\EndTurn.png'
+        tiled: false
+      - lastmod: 1748203461198
+        type: texture
+        name: Ship
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 96
+          - 32
+        marginx: 0
+        marginy: 0
+        imgWidth: 192
+        imgHeight: 64
+        width: 192
+        height: 64
+        offx: 0
+        offy: 0
+        origname: imhCTnMHcJHm8pm.png
+        shape: rect
+        left: 96
+        right: 96
+        top: 32
+        bottom: 32
+        uid: mhCTnMHcJHm8pm
+        padding: 1
+        isBlank: false
+        source: 'C:\Users\jpmon\Downloads\Ship.png'
+      - lastmod: 1748216694819
+        type: texture
+        name: ShipLeft
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 64
+        imgHeight: 64
+        width: 64
+        height: 64
+        offx: 0
+        offy: 0
+        origname: i9Q2rm3143pzQ5c.png
+        shape: rect
+        left: 0
+        right: 1
+        top: 0
+        bottom: 1
+        uid: 9Q2rm3143pzQ5c
+        padding: 1
+        isBlank: false
+        source: 'C:\Users\jpmon\Downloads\Triangulo_nave_def.png'
+        tiled: false
+      - lastmod: 1748219798568
+        type: texture
+        name: ShipRight
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 64
+        imgHeight: 64
+        width: 64
+        height: 64
+        offx: 0
+        offy: 0
+        origname: iFRJWJfpK6w1kzM.png
+        shape: rect
+        left: 0
+        right: 1
+        top: 0
+        bottom: 1
+        uid: FRJWJfpK6w1kzM
+        padding: 1
+        isBlank: false
+        source: 'C:\Users\jpmon\Downloads\ShipRight.png'
+        tiled: false
+      - lastmod: 1748212928266
+        type: texture
+        name: background_def
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 1920
+        imgHeight: 1080
+        width: 1920
+        height: 1080
+        offx: 0
+        offy: 0
+        origname: iLrDRNP6pcBd1B3.png
+        shape: rect
+        left: 0
+        right: 1920
+        top: 0
+        bottom: 1080
+        uid: LrDRNP6pcBd1B3
+        padding: 1
+        isBlank: false
+        source: 'C:\Users\jpmon\Downloads\background_def.png'
+        tiled: true
+      - lastmod: 1748214321986
+        type: texture
+        name: BoardLeft
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 64
+        imgHeight: 64
+        width: 64
+        height: 64
+        offx: 0
+        offy: 0
+        origname: iQFrwjR8RfK5NJz.png
+        shape: rect
+        left: 0
+        right: 1
+        top: 0
+        bottom: 1
+        uid: QFrwjR8RfK5NJz
+        padding: 1
+        isBlank: true
+        source: 'C:\Users\jpmon\Downloads\BoardLeft.png'
+        tiled: true
+      - lastmod: 1748219791759
+        type: texture
+        name: BoardRight
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 64
+        imgHeight: 64
+        width: 64
+        height: 64
+        offx: 0
+        offy: 0
+        origname: iL26rpNpqfcD7bM.png
+        shape: rect
+        left: 0
+        right: 1
+        top: 0
+        bottom: 1
+        uid: L26rpNpqfcD7bM
+        padding: 1
+        isBlank: true
+        source: 'C:\Users\jpmon\Downloads\BoardRight.png'
+        tiled: true
+globalVars:
+  - board
+  - tilemaps
 settings:
   authoring:
     author: THALKIMIA
